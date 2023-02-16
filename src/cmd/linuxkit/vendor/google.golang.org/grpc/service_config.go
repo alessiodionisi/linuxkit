@@ -20,13 +20,14 @@ package grpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/internal"
 	internalserviceconfig "google.golang.org/grpc/internal/serviceconfig"
 	"google.golang.org/grpc/serviceconfig"
@@ -79,7 +80,7 @@ type ServiceConfig struct {
 	serviceconfig.Config
 
 	// LB is the load balancer the service providers recommends. The balancer
-	// specified via grpc.WithBalancer will override this.  This is deprecated;
+	// specified via grpc.WithBalancerName will override this.  This is deprecated;
 	// lbConfigs is preferred.  If lbConfig and LB are both present, lbConfig
 	// will be used.
 	LB *string
@@ -224,19 +225,27 @@ func parseDuration(s *string) (*time.Duration, error) {
 }
 
 type jsonName struct {
-	Service *string
-	Method  *string
+	Service string
+	Method  string
 }
 
-func (j jsonName) generatePath() (string, bool) {
-	if j.Service == nil {
-		return "", false
+var (
+	errDuplicatedName             = errors.New("duplicated name")
+	errEmptyServiceNonEmptyMethod = errors.New("cannot combine empty 'service' and non-empty 'method'")
+)
+
+func (j jsonName) generatePath() (string, error) {
+	if j.Service == "" {
+		if j.Method != "" {
+			return "", errEmptyServiceNonEmptyMethod
+		}
+		return "", nil
 	}
-	res := "/" + *j.Service + "/"
-	if j.Method != nil {
-		res += *j.Method
+	res := "/" + j.Service + "/"
+	if j.Method != "" {
+		res += j.Method
 	}
-	return res, true
+	return res, nil
 }
 
 // TODO(lyuxuan): delete this struct after cleaning up old service config implementation.
@@ -268,7 +277,7 @@ func parseServiceConfig(js string) *serviceconfig.ParseResult {
 	var rsc jsonSC
 	err := json.Unmarshal([]byte(js), &rsc)
 	if err != nil {
-		grpclog.Warningf("grpc: parseServiceConfig error unmarshaling %s due to %v", js, err)
+		logger.Warningf("grpc: parseServiceConfig error unmarshaling %s due to %v", js, err)
 		return &serviceconfig.ParseResult{Err: err}
 	}
 	sc := ServiceConfig{
@@ -288,13 +297,15 @@ func parseServiceConfig(js string) *serviceconfig.ParseResult {
 	if rsc.MethodConfig == nil {
 		return &serviceconfig.ParseResult{Config: &sc}
 	}
+
+	paths := map[string]struct{}{}
 	for _, m := range *rsc.MethodConfig {
 		if m.Name == nil {
 			continue
 		}
 		d, err := parseDuration(m.Timeout)
 		if err != nil {
-			grpclog.Warningf("grpc: parseServiceConfig error unmarshaling %s due to %v", js, err)
+			logger.Warningf("grpc: parseServiceConfig error unmarshaling %s due to %v", js, err)
 			return &serviceconfig.ParseResult{Err: err}
 		}
 
@@ -303,7 +314,7 @@ func parseServiceConfig(js string) *serviceconfig.ParseResult {
 			Timeout:      d,
 		}
 		if mc.retryPolicy, err = convertRetryPolicy(m.RetryPolicy); err != nil {
-			grpclog.Warningf("grpc: parseServiceConfig error unmarshaling %s due to %v", js, err)
+			logger.Warningf("grpc: parseServiceConfig error unmarshaling %s due to %v", js, err)
 			return &serviceconfig.ParseResult{Err: err}
 		}
 		if m.MaxRequestMessageBytes != nil {
@@ -320,10 +331,20 @@ func parseServiceConfig(js string) *serviceconfig.ParseResult {
 				mc.MaxRespSize = newInt(int(*m.MaxResponseMessageBytes))
 			}
 		}
-		for _, n := range *m.Name {
-			if path, valid := n.generatePath(); valid {
-				sc.Methods[path] = mc
+		for i, n := range *m.Name {
+			path, err := n.generatePath()
+			if err != nil {
+				logger.Warningf("grpc: parseServiceConfig error unmarshaling %s due to methodConfig[%d]: %v", js, i, err)
+				return &serviceconfig.ParseResult{Err: err}
 			}
+
+			if _, ok := paths[path]; ok {
+				err = errDuplicatedName
+				logger.Warningf("grpc: parseServiceConfig error unmarshaling %s due to methodConfig[%d]: %v", js, i, err)
+				return &serviceconfig.ParseResult{Err: err}
+			}
+			paths[path] = struct{}{}
+			sc.Methods[path] = mc
 		}
 	}
 
@@ -356,7 +377,7 @@ func convertRetryPolicy(jrp *jsonRetryPolicy) (p *retryPolicy, err error) {
 		*mb <= 0 ||
 		jrp.BackoffMultiplier <= 0 ||
 		len(jrp.RetryableStatusCodes) == 0 {
-		grpclog.Warningf("grpc: ignoring retry policy %v due to illegal configuration", jrp)
+		logger.Warningf("grpc: ignoring retry policy %v due to illegal configuration", jrp)
 		return nil, nil
 	}
 
@@ -399,4 +420,35 @@ func getMaxSize(mcMax, doptMax *int, defaultVal int) *int {
 
 func newInt(b int) *int {
 	return &b
+}
+
+func init() {
+	internal.EqualServiceConfigForTesting = equalServiceConfig
+}
+
+// equalServiceConfig compares two configs. The rawJSONString field is ignored,
+// because they may diff in white spaces.
+//
+// If any of them is NOT *ServiceConfig, return false.
+func equalServiceConfig(a, b serviceconfig.Config) bool {
+	aa, ok := a.(*ServiceConfig)
+	if !ok {
+		return false
+	}
+	bb, ok := b.(*ServiceConfig)
+	if !ok {
+		return false
+	}
+	aaRaw := aa.rawJSONString
+	aa.rawJSONString = ""
+	bbRaw := bb.rawJSONString
+	bb.rawJSONString = ""
+	defer func() {
+		aa.rawJSONString = aaRaw
+		bb.rawJSONString = bbRaw
+	}()
+	// Using reflect.DeepEqual instead of cmp.Equal because many balancer
+	// configs are unexported, and cmp.Equal cannot compare unexported fields
+	// from unexported structs.
+	return reflect.DeepEqual(aa, bb)
 }
