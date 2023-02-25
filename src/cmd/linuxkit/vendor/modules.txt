@@ -63,7 +63,7 @@ github.com/Microsoft/hcsshim/osversion
 # github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
 ## explicit
 github.com/ScaleFT/sshkeys
-# github.com/aws/aws-sdk-go v1.31.6
+# github.com/aws/aws-sdk-go v1.34.0
 ## explicit
 github.com/aws/aws-sdk-go/aws
 github.com/aws/aws-sdk-go/aws/arn

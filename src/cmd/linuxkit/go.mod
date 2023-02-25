@@ -12,7 +12,7 @@ require (
 	github.com/Azure/go-autorest/autorest/validation v0.3.1 // indirect
 	github.com/Microsoft/go-winio v0.4.15-0.20190919025122-fc70bd9a86b5
 	github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
-	github.com/aws/aws-sdk-go v1.31.6
+	github.com/aws/aws-sdk-go v1.34.0
 	github.com/containerd/containerd v1.4.3
 	github.com/containerd/continuity v0.0.0-20200228182428-0f16d7a0959c // indirect
 	github.com/creack/goselect v0.0.0-20180501195510-58854f77ee8d // indirect
